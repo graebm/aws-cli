@@ -25,7 +25,7 @@ DEFAULTS = {
     'max_queue_size': 1000,
     'max_bandwidth': None,
     'preferred_transfer_client': constants.DEFAULT_TRANSFER_CLIENT,
-    'target_bandwidth': int(5 * (1024 ** 3) / 8),  # which is 5 Gb/s
+    'target_bandwidth': int(5 * 1_000_000_000 / 8),  # which is 5 Gigabit/s
 }
 
 

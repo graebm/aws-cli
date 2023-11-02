@@ -10,6 +10,7 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import threading
 from io import BytesIO
@@ -67,7 +68,7 @@ def create_s3_crt_client(
     region,
     botocore_credential_provider=None,
     num_threads=None,
-    target_throughput=5 * GB / 8,
+    target_throughput=5 * 1_000_000_000 / 8,
     part_size=8 * MB,
     use_ssl=True,
     verify=None,
@@ -137,7 +138,7 @@ def create_s3_crt_client(
             credentails_provider_adapter
         )
 
-    target_gbps = target_throughput * 8 / GB
+    target_gbps = target_throughput * 8 / 1_000_000_000.0
     return S3Client(
         bootstrap=bootstrap,
         region=region,
@@ -172,7 +173,8 @@ class CRTTransferManager:
             crt_request_serializer, self._osutil
         )
         self._future_coordinators = []
-        self._semaphore = threading.Semaphore(128)  # not configurable
+        self._semaphore = threading.Semaphore(10_000)  # not configurable
+        self._thread_pool = ThreadPoolExecutor()
         # A counter to create unique id's for each transfer submitted.
         self._id_counter = 0
 
@@ -271,28 +273,37 @@ class CRTTransferManager:
         afterdone = AfterDoneHandler(coordinator)
         on_done_after_calls.append(afterdone)
 
-        try:
-            self._semaphore.acquire()
-            on_queued = self._s3_args_creator.get_crt_callback(
-                future, 'queued'
-            )
-            on_queued()
-            crt_callargs = self._s3_args_creator.get_make_request_args(
-                request_type,
-                call_args,
-                coordinator,
-                future,
-                on_done_after_calls,
-            )
-            crt_s3_request = self._crt_s3_client.make_request(**crt_callargs)
-        except Exception as e:
-            coordinator.set_exception(e, True)
-            on_done = self._s3_args_creator.get_crt_callback(
-                future, 'done', after_subscribers=on_done_after_calls
-            )
-            on_done(error=e)
+        self._semaphore.acquire()
+
+        # quick hack to test thread-pool
+        def _make_request_on_thread():
+            try:
+                on_queued = self._s3_args_creator.get_crt_callback(
+                    future, 'queued'
+                )
+                on_queued()
+                crt_callargs = self._s3_args_creator.get_make_request_args(
+                    request_type,
+                    call_args,
+                    coordinator,
+                    future,
+                    on_done_after_calls,
+                )
+                crt_s3_request = self._crt_s3_client.make_request(**crt_callargs)
+            except Exception as e:
+                coordinator.set_exception(e, True)
+                on_done = self._s3_args_creator.get_crt_callback(
+                    future, 'done', after_subscribers=on_done_after_calls
+                )
+                on_done(error=e)
+            else:
+                coordinator.set_s3_request(crt_s3_request)
+
+        use_thread_pool = True
+        if use_thread_pool:
+            self._thread_pool.submit(_make_request_on_thread)
         else:
-            coordinator.set_s3_request(crt_s3_request)
+            _make_request_on_thread()
         self._future_coordinators.append(coordinator)
 
         self._id_counter += 1
